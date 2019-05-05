@@ -9,6 +9,10 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Linq;
 using Newtonsoft.Json.Linq;
+using Newtonsoft.Json;
+using System.Collections.Concurrent;
+using System.IO;
+using Newtonsoft.Json.Bson;
 
 namespace RabbitRPCSharp
 {
@@ -26,15 +30,12 @@ namespace RabbitRPCSharp
             }
         }
 
-        public string RabbitMQHost { get; set; } = "";
-        public int RabbitMQPost { get; set; } = 5672;
-        public string RabbitMQUsername { get; set; } = "";
-        public string RabbitMQPassword { get; set; } = "";
-        public string RabbitMQVirtualHost { get; set; } = "/rpc";
-
+        public RabbitMQConfig MQConfig { get; set; } = new RabbitMQConfig();
+       
         private MQService mqService;
         private Assembly hostAssembly = null;
         private List<RPCServiceMeta> metas = new List<RPCServiceMeta>();
+        private BlockingCollection<Tuple<BasicDeliverEventArgs, IModel>> messagePool = new BlockingCollection<Tuple<BasicDeliverEventArgs, IModel>>();
 
         protected RabbitRPCSharpService(Assembly host)
         {
@@ -47,6 +48,9 @@ namespace RabbitRPCSharp
                 var rpcService = type.GetCustomAttribute<RabbitRPCSharp.Attributes.RPCService>();
 
                 if (rpcService == null)
+                    continue;
+
+                if (type.IsAbstract)
                     continue;
 
                 var meta = new RPCServiceMeta();
@@ -70,94 +74,60 @@ namespace RabbitRPCSharp
 
                     m.Method.Name = string.IsNullOrEmpty(rpcMethod.Name) ? method.Name : rpcMethod.Name;
                     meta.Methods.Add(m);
-
-
                 }
 
                 metas.Add(meta);
             }
-
-            this.BindMeta(metas);
-        }
-
-        private void BindMeta(List<RPCServiceMeta> ms)
-        {
-             
         }
 
         public void Run()
         {
             mqService = new MQService();
-            mqService.RabbitMQHost = "mq.gezhigene.com";
-            mqService.RabbitMQUsername = "rpc";
-            mqService.RabbitMQPassword = "yh123456";
-            mqService.RabbitMQPost = 15672;
-            mqService.RabbitMQVirtualHost = "/rpc";
+            mqService.MQConfig.Host = "mq.gezhigene.com";
+            mqService.MQConfig.Username = "rpc";
+            mqService.MQConfig.Password = "yh123456";
+            mqService.MQConfig.Port = 15672;
+            mqService.MQConfig.VirtualHost = "/rpc";
             mqService.Connect();
-            mqService.Channel.QueueDeclare("rpc", false, false, false, null);
+            mqService.Channel.BasicQos(0, 1, false);
+            mqService.OnMessage += MqService_OnMessage;
 
             foreach (var item in this.metas)
             {
                 var servicename = item.ServiceType.Name;// string.isnullorempty(item.service.name) ? item.servicetype.name : item.service.name;
-                mqService.Channel.ExchangeDeclare(servicename, "direct", true, false, null);
+                mqService.Channel.QueueDeclare(servicename, false, false, false, null);
+                mqService.Channel.ExchangeDeclare(servicename, "direct", false, false, null);
 
                 foreach (var method in item.Methods)
                 {
                     var methodname = method.MethodType.Name;// string.isnullorempty(method.method.name) ? method.methodtype.name : method.method.name;
-                    mqService.Channel.QueueBind("rpc", servicename, methodname, null);
+                    mqService.Channel.QueueBind(servicename, servicename, methodname, null);
                 }
+
+                mqService.ReceiveAsync(servicename);
             }
 
-            foreach (var item in mqService.Receive("rpc"))
+           
+
+            while (true)
             {
-                this.HandleMessage(item);
+                var args = this.messagePool.Take();
+                this.HandleMessage(args.Item1,args.Item2);
             }
-            //var factory = new RabbitMQ.Client.ConnectionFactory();
-            //factory.UserName =this.RabbitMQUsername;
-            //factory.Password = this.RabbitMQPassword;
-            //factory.VirtualHost = this.RabbitMQVirtualHost;
-            //factory.HostName = this.RabbitMQHost;
-            //factory.Port = this.RabbitMQPost;
-
-            //using (var connection = factory.CreateConnection())
+            //foreach (var item in mqService.Receive("rpc"))
             //{
-            //    using (var channel = connection.CreateModel())
-            //    {
-            //        channel.QueueDeclare("rpc", false, false, false, null);
-
-            //        foreach (var item in this.metas)
-            //        {
-            //            var serviceName = item.ServiceType.Name;// string.IsNullOrEmpty(item.Service.Name) ? item.ServiceType.Name : item.Service.Name;
-            //            channel.ExchangeDeclare(serviceName, "direct", true, false, null);
-
-            //            foreach (var method in item.Methods)
-            //            {
-            //                var methodName = method.MethodType.Name;// string.IsNullOrEmpty(method.Method.Name) ? method.MethodType.Name : method.Method.Name;
-            //                channel.QueueBind("rpc", serviceName, methodName, null);
-            //            }
-            //        }
-
-            //        //var c = new EventingBasicConsumer(channel);
-            //        var consumer = new QueueingBasicConsumer(channel);
-            //        channel.BasicConsume("rpc", true, consumer);
-
-            //        Console.WriteLine($"[{DateTime.Now.ToString("yyyy-MM-dd hh:mm:ss")}] Connected to MQ server");
-
-
-
-            //        while (true)
-            //        {
-            //            var ea = (BasicDeliverEventArgs)consumer.Queue.Dequeue();
-            //            //var body = ea.Body;
-            //            //var message = Encoding.UTF8.GetString(body);
-            //            this.HandleMessage(channel,ea);
-            //        }
-            //    }
+            //    this.HandleMessage(item);
             //}
         }
 
+        private void MqService_OnMessage(BasicDeliverEventArgs arg1, IModel arg2)
+        {
+            this.messagePool.Add(new Tuple<BasicDeliverEventArgs, IModel>(arg1,arg2));
+        }
 
-        private void HandleMessage(BasicDeliverEventArgs args)
+        
+
+        private void HandleMessage(BasicDeliverEventArgs args,IModel model)
         {
             var serviceName = args.Exchange;
             var methodName = args.RoutingKey;
@@ -171,23 +141,51 @@ namespace RabbitRPCSharp
             if (method == null)
                 return;
 
-            var msg = Newtonsoft.Json.JsonConvert.DeserializeObject<RPCMessage>(Encoding.UTF8.GetString(args.Body));
-
-            var ps = method.MethodType.GetParameters();
-
-            List<object> arrays = new List<object>();
-
-            for (int i = 0; i < ps.Length; i++)
+            try
             {
-                var v = (msg.args.Values.ToArray()[i]);
-                arrays.Add(Convert.ChangeType(v, ps[i].ParameterType));
+
+                var msg = DeserializeData<Dictionary<string,object>>(args.Body);
+                //var msg = Newtonsoft.Json.JsonConvert.DeserializeObject<Dictionary<string, object>>(Encoding.UTF8.GetString(args.Body));
+                var ps = method.MethodType.GetParameters();
+
+                List<object> arrays = new List<object>();
+
+                for (int i = 0; i < ps.Length; i++)
+                {
+                    var v = (msg.Values.ToArray()[i]);
+                    arrays.Add(Convert.ChangeType(v, ps[i].ParameterType));
+                }
+
+                var ret = method.MethodType.Invoke(meta.ServiceInstance, arrays.ToArray());
+
+                var callerId = args.BasicProperties.CorrelationId;
+                var replyTo = args.BasicProperties.ReplyTo;
+
+                var property = model.CreateBasicProperties();
+                property.CorrelationId = callerId;
+                model.BasicPublish(exchange: "", routingKey: replyTo,
+                          basicProperties: property, body: Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(ret)));
+
+                property = null;
+
             }
+            finally
+            {
 
-            var ret = method.MethodType.Invoke(meta.ServiceInstance, arrays.ToArray());
+            }
+        }
+         
+        protected virtual T DeserializeData<T>(byte[] data)
+        {
+            MemoryStream ms = new MemoryStream(data);
+            using (BsonReader reader = new BsonReader(ms))
+            {
+                JsonSerializer serializer = new JsonSerializer();
 
-            mqService.Send("rpcResult", msg.message_id, ret);
-            //channel.BasicPublish("result", msg.message_id, false, null, null);
-            //Console.WriteLine(ret);
+                T e = serializer.Deserialize<T>(reader);
+
+                return e;
+            }
         }
     }
 }
