@@ -31,7 +31,7 @@ namespace RabbitRPCSharp
         }
 
         public RabbitMQConfig MQConfig { get; set; } = new RabbitMQConfig();
-       
+
         private MQService mqService;
         private Assembly hostAssembly = null;
         private List<RPCServiceMeta> metas = new List<RPCServiceMeta>();
@@ -63,7 +63,7 @@ namespace RabbitRPCSharp
                 {
                     var rpcMethod = method.GetCustomAttribute<RabbitRPCSharp.Attributes.RPCMethod>();
 
-                    if (rpcMethod== null)
+                    if (rpcMethod == null)
                         continue;
 
                     var m = new RPCMethodMeta()
@@ -107,12 +107,14 @@ namespace RabbitRPCSharp
                 mqService.ReceiveAsync(servicename);
             }
 
-           
+
 
             while (true)
             {
                 var args = this.messagePool.Take();
-                this.HandleMessage(args.Item1,args.Item2);
+
+                this.HandleMessage(args.Item1, args.Item2);
+
             }
             //foreach (var item in mqService.Receive("rpc"))
             //{
@@ -122,29 +124,31 @@ namespace RabbitRPCSharp
 
         private void MqService_OnMessage(BasicDeliverEventArgs arg1, IModel arg2)
         {
-            this.messagePool.Add(new Tuple<BasicDeliverEventArgs, IModel>(arg1,arg2));
+            this.messagePool.Add(new Tuple<BasicDeliverEventArgs, IModel>(arg1, arg2));
         }
 
-        
 
-        private void HandleMessage(BasicDeliverEventArgs args,IModel model)
+
+        private void HandleMessage(BasicDeliverEventArgs args, IModel model)
         {
-            var serviceName = args.Exchange;
-            var methodName = args.RoutingKey;
-            var meta = this.metas.Where(x => x.ServiceType.Name == serviceName).FirstOrDefault();
-
-            if (meta == null)
-                return;
-
-            var method = meta.Methods.Where(x => x.MethodType.Name == methodName).FirstOrDefault();
-
-            if (method == null)
-                return;
+            object ret = null;
 
             try
             {
+                var serviceName = args.Exchange;
+                var methodName = args.RoutingKey;
+                var meta = this.metas.Where(x => x.ServiceType.Name == serviceName).FirstOrDefault();
 
-                var msg = DeserializeData<Dictionary<string,object>>(args.Body);
+                if (meta == null)
+                    return;
+
+                var method = meta.Methods.Where(x => x.MethodType.Name == methodName).FirstOrDefault();
+
+                if (method == null)
+                    return;
+
+
+                var msg = UtilHelper.BSON.DeserializeData<Dictionary<string, object>>(args.Body);
                 //var msg = Newtonsoft.Json.JsonConvert.DeserializeObject<Dictionary<string, object>>(Encoding.UTF8.GetString(args.Body));
                 var ps = method.MethodType.GetParameters();
 
@@ -156,36 +160,27 @@ namespace RabbitRPCSharp
                     arrays.Add(Convert.ChangeType(v, ps[i].ParameterType));
                 }
 
-                var ret = method.MethodType.Invoke(meta.ServiceInstance, arrays.ToArray());
+                ret = method.MethodType.Invoke(meta.ServiceInstance, arrays.ToArray());
 
+            }
+            catch(Exception ee)
+            {
+                
+            }
+            finally
+            {
                 var callerId = args.BasicProperties.CorrelationId;
                 var replyTo = args.BasicProperties.ReplyTo;
 
                 var property = model.CreateBasicProperties();
                 property.CorrelationId = callerId;
                 model.BasicPublish(exchange: "", routingKey: replyTo,
-                          basicProperties: property, body: Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(ret)));
+                          basicProperties: property, body: UtilHelper.BSON.SerializeData(ret));
 
                 property = null;
-
-            }
-            finally
-            {
-
             }
         }
-         
-        protected virtual T DeserializeData<T>(byte[] data)
-        {
-            MemoryStream ms = new MemoryStream(data);
-            using (BsonReader reader = new BsonReader(ms))
-            {
-                JsonSerializer serializer = new JsonSerializer();
 
-                T e = serializer.Deserialize<T>(reader);
-
-                return e;
-            }
-        }
+       
     }
 }

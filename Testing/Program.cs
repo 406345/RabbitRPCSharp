@@ -109,11 +109,11 @@ namespace Testing
         static void Main(string[] args)
         { 
 #if DEBUG
-            Server();
             Console.WriteLine("Server mode started");
+            Server();
 #else
-            Client();
             Console.WriteLine("Client mode started");
+            Client();
 #endif
             Console.ReadLine();
         }

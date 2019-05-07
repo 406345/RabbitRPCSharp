@@ -56,7 +56,7 @@ namespace RabbitRPCSharp
                 ++index;
             }
 
-            mq.Send(service, method, SerializeData(dict), property);
+            mq.Send(service, method, UtilHelper.BSON.SerializeData(dict), property);
             //mq.Send(service, method, dict, property);
 
             foreach (var item in mq.Receive(this.QueueName))
@@ -64,7 +64,7 @@ namespace RabbitRPCSharp
                 if (item.BasicProperties.CorrelationId != this.Id)
                     continue;
 
-                var result = JsonConvert.DeserializeObject<T>(Encoding.UTF8.GetString(item.Body));
+                var result = UtilHelper.BSON.DeserializeData<T>(item.Body);
                 return result;
             }
 
@@ -77,17 +77,6 @@ namespace RabbitRPCSharp
             return this.Call<object>(service,method,args);
         }
 
-        protected virtual byte[] SerializeData(object data)
-        {
-            MemoryStream ms = new MemoryStream();
-
-            using (BsonWriter writer = new BsonWriter(ms))
-            {
-                JsonSerializer serializer = new JsonSerializer();
-                serializer.Serialize(writer, data);
-            }
-
-            return ms.ToArray();
-        }
+      
     }
 }
